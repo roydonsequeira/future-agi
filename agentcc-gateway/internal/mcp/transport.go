@@ -291,7 +291,11 @@ func (t *StdioTransport) Send(ctx context.Context, msg *Message) (*Message, erro
 
 	// Wait for response or context cancellation.
 	select {
-	case resp := <-ch:
+	case resp, ok := <-ch:
+		if !ok {
+			// Close closes the channel of every request still waiting.
+			return nil, fmt.Errorf("transport closed")
+		}
 		return resp, nil
 	case <-ctx.Done():
 		t.pendMu.Lock()

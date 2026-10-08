@@ -229,6 +229,36 @@ func TestHTTPTransportClose(t *testing.T) {
 	}
 }
 
+// Callers read resp.Error whenever Send returns no error, so a request still
+// waiting when the transport closes has to fail rather than come back nil.
+func TestStdioTransportCloseFailsPendingRequest(t *testing.T) {
+	transport := NewStdioTransport(os.Args[0], []string{
+		"-test.run=^TestStdioTransportHelperProcess$",
+		"--",
+		"mcp-stdio-no-response",
+	})
+	if err := transport.Start(context.Background()); err != nil {
+		t.Fatalf("start stdio transport: %v", err)
+	}
+	defer transport.Close()
+
+	go func() {
+		// The helper exits once it has read the request, so by the time the
+		// transport turns unhealthy the request is waiting for an answer.
+		for transport.Healthy() {
+			time.Sleep(10 * time.Millisecond)
+		}
+		transport.Close()
+	}()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	msg := &Message{JSONRPC: "2.0", ID: json.RawMessage(`1`), Method: MethodPing}
+	if _, err := transport.Send(ctx, msg); err == nil || ctx.Err() != nil {
+		t.Fatalf("send should fail as soon as the transport closes, got err=%v", err)
+	}
+}
+
 func TestStdioTransportHandlesLargeResponses(t *testing.T) {
 	transport := NewStdioTransport(os.Args[0], []string{
 		"-test.run=^TestStdioTransportHelperProcess$",
@@ -261,13 +291,20 @@ func TestStdioTransportHandlesLargeResponses(t *testing.T) {
 }
 
 func TestStdioTransportHelperProcess(t *testing.T) {
-	if len(os.Args) == 0 || os.Args[len(os.Args)-1] != "mcp-stdio-large-response" {
+	if len(os.Args) == 0 {
+		return
+	}
+	mode := os.Args[len(os.Args)-1]
+	if mode != "mcp-stdio-large-response" && mode != "mcp-stdio-no-response" {
 		return
 	}
 
 	var request Message
 	if err := json.NewDecoder(os.Stdin).Decode(&request); err != nil {
 		os.Exit(2)
+	}
+	if mode == "mcp-stdio-no-response" {
+		os.Exit(0)
 	}
 
 	response, err := NewResponse(request.ID, map[string]string{
